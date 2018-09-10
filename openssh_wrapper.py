@@ -503,7 +503,7 @@ class SSHResult(object):
 
         Effectively, returns stdout
         """
-        if sys.version_info[0] == 2:
+        if sys.version_info[0] == '2':
             # get ASCII representation.
             return self.stdout
         else:
@@ -517,7 +517,7 @@ class SSHResult(object):
         For python2.x it's the raw string objects, whereas python3.x
         contains the unicode representation (str)
         """
-        if sys.version_info[0] == 2:
+        if sys.version_info[0] == '2':
             # get ASCII representation.
             return self.repr_binary()
         else:
