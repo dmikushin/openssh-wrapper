@@ -598,7 +598,7 @@ class SSHResult(object):
 
         Effectively, returns stdout
         """
-        if sys.version_info[0] == '2':
+        if sys.version[0] == '2':
             # get ASCII representation.
             return self.stdout
         else:
