@@ -75,6 +75,7 @@ class SSHConnection(object):
 
     def __init__(self, server, login=None, port=None, configfile=None,
                  identity_file=None, ssh_agent_socket=None, timeout=60, debug=False,
+                 options=[],
                  master=False, slave=False, control_path=None):
         """
         Create new object to establish SSH connection to remote servers
@@ -84,6 +85,8 @@ class SSHConnection(object):
         :param port: SSH port number. Optional.
         :param configfile: local configuration file (by default ~/.ssh/config is used)
         :param identity_file:  address of the socket to connect to ssh agent,
+        :param options: pass-through SSH client config options directly to openSSH
+            (caution: no sanity checks is being done for these options)
         :param master: run SSH in master mode (i.e. enable connection sharing, other
             slave SSHConnection instances can use this SSHConnection as their master
             SSHConnection)
@@ -129,6 +132,7 @@ class SSHConnection(object):
         self.login = None
         self.identity_file = None
         self.ssh_agent_socket = None
+        self.options = options
 
         if not slave:
 
@@ -423,6 +427,8 @@ class SSHConnection(object):
             cmd += ['-N', '-M', '-S', self.control_path]
         if self.slave and self.control_path is not None and not init_master:
             cmd += ['-S', self.control_path]
+        for option in self.options:
+            cmd += ['-o', option]
         cmd.append(self.server)
 
         if interpreter:
@@ -449,6 +455,8 @@ class SSHConnection(object):
             cmd += ['-i', self.identity_file]
         if self.port:
             cmd += ['-P', str(self.port)]
+        for option in self.options:
+            cmd += ['-o', option]
 
         if isinstance(files, (text, bytes)):
             raise ValueError('"files" argument have to be iterable (list or tuple)')
