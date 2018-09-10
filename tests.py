@@ -2,6 +2,7 @@
 import io
 import os
 import pytest
+import tempfile
 from openssh_wrapper import *
 
 test_file = os.path.join(os.path.dirname(__file__), 'tests.py')
@@ -102,3 +103,56 @@ class TestSCP(object):
         fd2.name = 'test2.txt'
         self.c.scp((fd2, ), target='/tmp', mode='0644')
         assert io.open('/tmp/test2.txt', 'rt').read() == 'test'
+
+
+class TestSSHMasterSlaveConnections(object):
+
+    def setup_method(self, meth):
+        control_path_dir = tempfile.mkdtemp()
+        self.control_path='{tmpdir}/control_path.socket'.format(tmpdir=control_path_dir)
+        self.c_ms = SSHConnection('localhost', login=current_user,
+                               master=True, slave=True, control_path=self.control_path,
+                               configfile='ssh_config.test')
+        self.c_m = SSHConnection('localhost', login=current_user,
+                               master=True, control_path=self.control_path,
+                               configfile='ssh_config.test')
+        self.c_s = SSHConnection('localhost', login=current_user,
+                               slave=True, control_path=self.control_path,
+                               configfile='ssh_config.test')
+
+    # MASTER+SLAVE MODE
+    # one SSHConnection instance acts as master and slave connection
+
+    def test_masterslave_initmaster_ssh_command(self):
+        eq_(self.c_m.ssh_command(init_master=True),
+            b_list(['/usr/bin/ssh', '-l', current_user, '-F', 'ssh_config.test', '-N', '-M', '-S', self.control_path, 'localhost']))
+
+    def test_masterslave_ssh_command(self):
+        eq_(self.c_ms.ssh_command('/bin/bash', False),
+            b_list(['/usr/bin/ssh', '-F', 'ssh_config.test', '-S', self.control_path, 'localhost', '/bin/bash']))
+
+    def test_masterslave_simple_command(self):
+        result = self.c_ms.run('whoami')
+        eq_(result.stdout, b(current_user))
+        eq_(result.stderr, b(''))
+        eq_(result.returncode, 0)
+
+    # MASTER-ONLY MODE
+    # an SSHConnection instance is in master-only mode
+
+    def test_master_initmaster_ssh_command(self):
+        eq_(self.c_m.ssh_command(init_master=True),
+            b_list(['/usr/bin/ssh', '-l', current_user, '-F', 'ssh_config.test', '-N', '-M', '-S', self.control_path, 'localhost']))
+
+    # SLAVE-ONLY MODE
+    # another SSHConnection instance shared connections with another SSHConnection that runs in master+slave or master-only mode
+
+    def test_slave_ssh_command(self):
+        eq_(self.c_s.ssh_command('/bin/bash', False),
+            b_list(['/usr/bin/ssh',  '-F', 'ssh_config.test', '-S', self.control_path, 'localhost', '/bin/bash']))
+
+    def test_slave_simple_command(self):
+        result = self.c_s.run('whoami')
+        eq_(result.stdout, b(current_user))
+        eq_(result.stderr, b(''))
+        eq_(result.returncode, 0)

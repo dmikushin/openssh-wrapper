@@ -5,6 +5,7 @@ This is a wrapper around the openssh binaries ssh and scp.
 import io
 import re
 import os
+import os.path
 import sys
 import pipes
 import signal
@@ -73,7 +74,8 @@ class SSHConnection(object):
     """
 
     def __init__(self, server, login=None, port=None, configfile=None,
-                 identity_file=None, ssh_agent_socket=None, timeout=60, debug=False):
+                 identity_file=None, ssh_agent_socket=None, timeout=60, debug=False,
+                 master=False, slave=False, control_path=None):
         """
         Create new object to establish SSH connection to remote servers
 
@@ -82,6 +84,14 @@ class SSHConnection(object):
         :param port: SSH port number. Optional.
         :param configfile: local configuration file (by default ~/.ssh/config is used)
         :param identity_file:  address of the socket to connect to ssh agent,
+        :param master: run SSH in master mode (i.e. enable connection sharing, other
+            slave SSHConnection instances can use this SSHConnection as their master
+            SSHConnection)
+        :param slave: run SSH in slave mode (i.e. share the connection with an already
+            established SSHConnection running in master mode)
+        :param control_path: a path containing an existing directory and a socket file
+            name to be used as the master/slave connection's control path
+
         if you want to use it. ``SSH_AUTH_SOCK`` environment variable is
         used if None is supplied.
         :param ssh_agent_socket: address of the socket to connect to ssh agent
@@ -101,24 +111,56 @@ class SSHConnection(object):
         self.check_server(server)
         self.user = getpass.getuser()
         self.debug = debug
-        if login:
-            self.check_login(login)
-            self.login = b(login)
-        else:
-            self.login = None
+
+        # master / slave connections
+        self.master = master
+        self.control_path = control_path
+        self.slave = slave
+
+        self.check_master_slave_settings()
+
         if configfile:
             self.configfile = os.path.expanduser(configfile)
             if not os.path.isfile(self.configfile):
                 raise SSHError('Config file %s is not found' % self.configfile )
         else:
             self.configfile = None
-        if identity_file:
-            self.identity_file = os.path.expanduser(identity_file)
-            if not os.path.isfile(self.identity_file):
-                raise SSHError('Key file %s is not found' % self.identity_file)
-        else:
-            self.identity_file = None
-        self.ssh_agent_socket = ssh_agent_socket
+
+        self.login = None
+        self.identity_file = None
+        self.ssh_agent_socket = None
+
+        if not slave:
+
+            # this is only needed for master sessions or for session not in master/slave mode
+            # slave-only SSHConnection instance don't need the below auth data...
+            if login:
+                self.check_login(login)
+                self.login = b(login)
+            if identity_file:
+                self.identity_file = os.path.expanduser(identity_file)
+                if not os.path.isfile(self.identity_file):
+                    raise SSHError('Key file %s is not found' % self.identity_file)
+            self.ssh_agent_socket = ssh_agent_socket
+
+        if self.master:
+            init_master_ssh_command = self.ssh_command(init_master=True)
+
+            self.master_ssh_pipe = subprocess.Popen(init_master_ssh_command,
+                                                stdin=None,
+                                                stdout=None,
+                                                stderr=None,
+                                                env=self.get_env())
+
+    def __del__(self):
+        """
+        SSHConnection destructor method
+        """
+        if self.master:
+            # take down SSH master process...
+            if hasattr(self, 'master_ssh_pipe') and self.master_ssh_pipe:
+                self.master_ssh_pipe.terminate()
+                self.master_ssh_pipe.communicate()
 
     def check_server(self, server):
         """
@@ -142,6 +184,25 @@ class SSHConnection(object):
         if not re.compile(r'^[a-zA-Z0-9.\-_]+$').match(login):
             raise SSHError('User login contains illegal symbols')
 
+    def check_master_slave_settings(self):
+        """
+        Run some sanity checks on the provided master / slave connection related
+        parameters.
+        """
+
+        if self.master or self.slave:
+            if self.control_path is None:
+                raise SSHError('SSHConnection needs a control path when run in master or slave mode.')
+
+            if not os.path.isdir(os.path.dirname(self.control_path)):
+                raise SSHError('SSHConnection expects that a directory for the control_path file already exists.')
+
+        if self.control_path:
+            if type(self.control_path) == str:
+                self.control_path = os.path.expanduser(self.control_path)
+            else:
+                raise SSHError('Config file %s is not found' % self.configfile )
+
     def run(self, command, interpreter='/bin/bash', forward_ssh_agent=False):
         """
         Execute the command using the interpreter provided
@@ -157,13 +218,17 @@ class SSHConnection(object):
         :param interpreter: name of the interpreter (by default "/bin/bash" is used)
         :param forward_ssh_agent: turn this flag to `True`, if you want to use
         and forward SSH agent
-
         :return: SSH result instance
         :rtype: SSHResult
 
         :raise: SSHError, if server is unreachable, or timeout has reached.
         """
-        ssh_command = self.ssh_command(interpreter, forward_ssh_agent)
+
+        # master-only SSHConnection instances cannot be used to run commands
+        if self.master and not self.slave:
+            raise SSHError('This SSHConnection is an SSH master connection, no commands can be sent to the server on this SSHConnection.')
+
+        ssh_command = self.ssh_command(interpreter=interpreter, forward_ssh_agent=forward_ssh_agent)
         pipe = subprocess.Popen(ssh_command,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=self.get_env())
@@ -215,6 +280,10 @@ class SSHConnection(object):
         :return: None
         :raise: SSHError
         """
+        # master-only SSHConnection instances cannot be used to do secure copying
+        if self.master and not self.slave:
+            raise SSHError('This SSHConnection is an SSH master connection, no secure copying can be done over this SSHConnection.')
+
         filenames, tmpdir = self.convert_files_to_filenames(files)
 
         def cleanup_tmp_dir():
@@ -328,13 +397,15 @@ class SSHConnection(object):
         else:
             return [target, ]
 
-    def ssh_command(self, interpreter, forward_ssh_agent):
+    def ssh_command(self, interpreter=None, forward_ssh_agent=False, init_master=False):
         """
         Build the command string to connect to the server and start the interpreter.
 
         Internal function
         """
-        interpreter = b(interpreter)
+        if not interpreter and not init_master:
+            raise SSHError('SSHConnection.ssh_command(): No interpreter given.')
+
         cmd = ['/usr/bin/ssh', ]
         if self.debug:
             cmd += ['-vvvv']
@@ -348,8 +419,16 @@ class SSHConnection(object):
             cmd.append('-A')
         if self.port:
             cmd += ['-p', str(self.port)]
+        if self.master and init_master and self.control_path is not None:
+            cmd += ['-N', '-M', '-S', self.control_path]
+        if self.slave and self.control_path is not None and not init_master:
+            cmd += ['-S', self.control_path]
         cmd.append(self.server)
-        cmd.append(interpreter)
+
+        if interpreter:
+            interpreter = b(interpreter)
+            cmd.append(interpreter)
+
         return b_list(cmd)
 
     def scp_command(self, files, target):
