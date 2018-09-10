@@ -612,7 +612,7 @@ class SSHResult(object):
         For python2.x it's the raw string objects, whereas python3.x
         contains the unicode representation (str)
         """
-        if sys.version_info[0] == '2':
+        if sys.version[0] == '2':
             # get ASCII representation.
             return self.repr_binary()
         else:
@@ -622,14 +622,15 @@ class SSHResult(object):
     def repr_binary(self):
         """ Build simple unicode representation from all member values. """
         ret = []
-        ret += [b('command: '), self.command, b('\n')]
-        ret += [b('stdout: '), self.stdout, b('\n')]
-        ret += [b('stderr: '), self.stderr, b('\n')]
+
+        ret += [b('command: '), b(self.command), b('\n')]
+        ret += [b('stdout: '), b(self.stdout), b('\n')]
+        ret += [b('stderr: '), b(self.stderr), b('\n')]
         ret += [b('returncode: '), b(text(self.returncode))]
         return b('').join(ret)
 
     def repr_text(self):
-        return self.repr_binary().encode('utf-8', 'ignore')
+        return self.repr_binary().decode('utf-8', 'ignore')
 
 
 class SSHError(Exception):
