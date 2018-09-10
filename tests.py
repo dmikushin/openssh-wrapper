@@ -4,32 +4,33 @@ import os
 import pytest
 from openssh_wrapper import *
 
-
 test_file = os.path.join(os.path.dirname(__file__), 'tests.py')
 
 
 def eq_(arg1, arg2):
     assert arg1 == arg2
 
+import getpass
+current_user=getpass.getuser()
 
 class TestSSHCommandNames(object):
 
     def setup_method(self, meth):
-        self.c = SSHConnection('localhost', login='root',
+        self.c = SSHConnection('localhost', login=current_user,
                                configfile='ssh_config.test')
 
     def test_ssh_command(self):
         eq_(self.c.ssh_command('/bin/bash', False),
-            b_list(['/usr/bin/ssh', '-l', 'root', '-F', 'ssh_config.test', 'localhost', '/bin/bash']))
+            b_list(['/usr/bin/ssh', '-l', current_user, '-F', 'ssh_config.test', 'localhost', '/bin/bash']))
 
     def test_scp_command(self):
         eq_(self.c.scp_command(('/tmp/1.txt', ), target='/tmp/2.txt'),
-            b_list(['/usr/bin/scp', '-q', '-r', '-F', 'ssh_config.test', '/tmp/1.txt', 'root@localhost:/tmp/2.txt']))
+            b_list(['/usr/bin/scp', '-q', '-r', '-F', 'ssh_config.test', '/tmp/1.txt', '{user}@localhost:/tmp/2.txt'.format(user=current_user)]))
 
     def test_scp_multiple_files(self):
         eq_(self.c.scp_command(('/tmp/1.txt', '2.txt'), target='/home/username/'),
             b_list(['/usr/bin/scp', '-q', '-r', '-F', 'ssh_config.test', '/tmp/1.txt', '2.txt',
-                    'root@localhost:/home/username/']))
+                    '{user}@localhost:/home/username/'.format(user=current_user)]))
 
     def test_scp_targets(self):
         targets = self.c.get_scp_targets(['foo.txt', 'bar.txt'], '/etc')
@@ -39,7 +40,7 @@ class TestSSHCommandNames(object):
 
     def test_simple_command(self):
         result = self.c.run('whoami')
-        eq_(result.stdout, b('root'))
+        eq_(result.stdout, b(current_user))
         eq_(result.stderr, b(''))
         eq_(result.returncode, 0)
 
@@ -49,8 +50,9 @@ class TestSSHCommandNames(object):
         eq_(result.stderr, b(''))
         eq_(result.returncode, 0)
 
+
 def test_timeout():
-    c = SSHConnection('example.com', login='root', timeout=1)
+    c = SSHConnection('example.com', login=current_user, timeout=1)
     with pytest.raises(SSHError):  # ssh connect timeout
         c.run('whoami')
 
@@ -64,7 +66,7 @@ def test_permission_denied():
 class TestSCP(object):
 
     def setup_method(self, meth):
-        self.c = SSHConnection('localhost', login='root')
+        self.c = SSHConnection('localhost', login=current_user)
         self.c.run('rm -f /tmp/*.py /tmp/test*.txt')
 
     def test_scp(self):
