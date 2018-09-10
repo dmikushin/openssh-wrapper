@@ -14,7 +14,7 @@ import getpass
 import tempfile
 import subprocess
 
-__all__ = 'SSHConnection SSHResult SSHError b u b_list u_list'.split()
+__all__ = 'SSHConnection SSHForwardingTunnel SSHRevForwardingTunnel SSHResult SSHError b u b_list u_list'.split()
 
 if sys.version[0] == '2':
     text = unicode
@@ -65,6 +65,69 @@ def b_quote(cmd_chunks):
         # pipes.quote works with text representation only
         quoted.append(b(pipes.quote(u(chunk))))
     return b(' ').join(quoted)
+
+class _SSHTunnel(object):
+
+    def __init__(self, local_addr='localhost', local_port=0, remote_addr='localhost', remote_port=0):
+        """
+        Set up an SSHTunnel object.
+
+        :param local_addr: bind forwarding tunnel to this local address
+        :param local_port: bind forwarding tunnel to this local port
+        :param remote_addr: direct connections through the forwarding tunnel to this remote address
+        :param remote_port: direct connections through the forwarding tunnel to this remote port
+        """
+        if local_port == 0 or remote_port == 0:
+            raise SSHError('SSHTunnel objects require the local port and the remote port to be set and non-zero.')
+
+        self.local_addr = local_addr
+        self.local_port = local_port
+        self.remote_addr= remote_addr
+        self.remote_port = remote_port
+
+    def __str__(self):
+        """
+        Generate the tunnel string portion required in the SSH command line.
+        """
+        return ('{l_a}:{l_p}:{r_a}:{r_p}'.format(l_a=self.local_addr, l_p=self.local_port, r_a=self.remote_addr, r_p=self.remote_port))
+
+class SSHForwardingTunnel(_SSHTunnel):
+
+    def __init__(self, *args, **kwargs):
+        """
+        Set up a port forwarding (openssh -L) tunnel.
+
+        :param local_addr: bind forwarding tunnel to this local address
+        :param local_port: bind forwarding tunnel to this local port
+        :param remote_addr: direct connections through the forwarding tunnel to this remote address
+        :param remote_port: direct connections through the forwarding tunnel to this remote port
+        """
+        _SSHTunnel.__init__(self, *args, **kwargs)
+
+    def __str__(self):
+        """
+        Generate a forwarding tunnel option command line string for the SSH command.
+        """
+        return '-L {tunnel}'.format(tunnel=_SSHTunnel.__str__(self))
+
+class SSHRevForwardingTunnel(_SSHTunnel):
+
+    def __init__(self, *args, **kwargs):
+        """
+        Set up a reverse port forwarding (openssh -R) tunnel.
+
+        :param local_addr: direct connections through the reverse forwarding tunnel to this local address
+        :param local_port: direct connections through the reverse forwarding tunnel to this local port
+        :param remote_addr: bind reverse forwarding tunnel to this address on the remote system
+        :param remote_port: bind reverse forwarding tunnel to this port on the remote system
+        """
+        _SSHTunnel.__init__(self, *args, **kwargs)
+
+    def __str__(self):
+        """
+        Generate a reverse forwarding tunnel option command line string for the SSH command.
+        """
+        return '-R {tunnel}'.format(tunnel=_SSHTunnel.__str__(self))
 
 
 class SSHConnection(object):
@@ -134,6 +197,8 @@ class SSHConnection(object):
         self.ssh_agent_socket = None
         self.options = options
 
+        self.tunneling_pipes = []
+
         if not slave:
 
             # this is only needed for master sessions or for session not in master/slave mode
@@ -160,6 +225,12 @@ class SSHConnection(object):
         """
         SSHConnection destructor method
         """
+        # take down all SSH forwarding tunnels
+        for tunneling_pipe in self.tunneling_pipes:
+            # empty the stdout, stderr bufffer of the subprocess PIPE
+            tunneling_pipe.terminate()
+            tunneling_pipe.communicate()
+
         if self.master:
             # take down SSH master process...
             if hasattr(self, 'master_ssh_pipe') and self.master_ssh_pipe:
@@ -207,7 +278,7 @@ class SSHConnection(object):
             else:
                 raise SSHError('Config file %s is not found' % self.configfile )
 
-    def run(self, command, interpreter='/bin/bash', forward_ssh_agent=False):
+    def run(self, command, interpreter='/bin/bash', forward_ssh_agent=False, tunnels=[]):
         """
         Execute the command using the interpreter provided
 
@@ -222,6 +293,11 @@ class SSHConnection(object):
         :param interpreter: name of the interpreter (by default "/bin/bash" is used)
         :param forward_ssh_agent: turn this flag to `True`, if you want to use
         and forward SSH agent
+        :param tunnels: single tunnel or a list of tunnels. The tunnels
+            have to be :class:`_SSHTunnel` derived objects. NOTE: using tunnels
+            in the :func:`run()` method only makes sense for commands that launch
+            a long running remote process. Possibly, you may rather be looking for
+            the :func:`run_tunnels()' method.
         :return: SSH result instance
         :rtype: SSHResult
 
@@ -232,7 +308,7 @@ class SSHConnection(object):
         if self.master and not self.slave:
             raise SSHError('This SSHConnection is an SSH master connection, no commands can be sent to the server on this SSHConnection.')
 
-        ssh_command = self.ssh_command(interpreter=interpreter, forward_ssh_agent=forward_ssh_agent)
+        ssh_command = self.ssh_command(interpreter=interpreter, forward_ssh_agent=forward_ssh_agent, tunnels=[])
         pipe = subprocess.Popen(ssh_command,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=self.get_env())
@@ -258,6 +334,37 @@ class SSHConnection(object):
             raise SSHError("%s (under %s): %s" % (
                 ' '.join(u_list(ssh_command)), self.user, err.strip()))
         return SSHResult(command, out.strip(), err.strip(), returncode)
+
+
+    def run_tunnels(self, tunnels):
+        """
+
+        Run one or more port forwarding / reverse forwarding tunnels in a
+        separate process without interaction with a remote shell.
+
+        :param tunnels: single tunnel or a list of tunnels. The tunnels
+            have to be :class:`_SSHTunnel` derived objects
+
+        :return: the :class:`subprocess.Popen` pipe object that was used to
+            launch the tunnel(s) (and that can be used to take it/them down
+            again)
+        :rtype: ``obj``
+        """
+        if type(tunnels) not in (list, tuple):
+            tunnels = [tunnels]
+
+        ssh_command = self.ssh_command(tunnels=tunnels)
+
+        tunneling_pipe = subprocess.Popen(ssh_command,
+                                          stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE,
+                                          env=self.get_env())
+
+        # collect the tunneling pipes...
+        self.tunneling_pipes.append(tunneling_pipe)
+
+        return tunneling_pipe
 
     def scp(self, files, target, mode=None, owner=None):
         """ Copy files identified by their names to remote location
@@ -464,13 +571,20 @@ class SSHConnection(object):
         else:
             return [target, ]
 
-    def ssh_command(self, interpreter=None, forward_ssh_agent=False, init_master=False):
+    def ssh_command(self, interpreter=None,
+                          forward_ssh_agent=False,
+                          init_master=False,
+                          tunnels=[],
+                   ):
         """
         Build the command string to connect to the server and start the interpreter.
 
         Internal function
         """
-        if not interpreter and not init_master:
+        if not interpreter and \
+           not init_master and \
+           not tunnels         \
+           :
             raise SSHError('SSHConnection.ssh_command(): No interpreter given.')
 
         cmd = ['/usr/bin/ssh', ]
@@ -486,12 +600,17 @@ class SSHConnection(object):
             cmd.append('-A')
         if self.port:
             cmd += ['-p', str(self.port)]
+        if interpreter == None:
+            cmd += ['-N']
         if self.master and init_master and self.control_path is not None:
-            cmd += ['-N', '-M', '-S', self.control_path]
+            cmd += ['-M', '-S', self.control_path]
         if self.slave and self.control_path is not None and not init_master:
             cmd += ['-S', self.control_path]
+        for tunnel in tunnels:
+            cmd += [ str(tunnel) ]
         for option in self.options:
             cmd += ['-o', option]
+
         cmd.append(self.server)
 
         if interpreter:
