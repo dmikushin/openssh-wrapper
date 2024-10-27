@@ -171,7 +171,7 @@ class SSHConnection(object):
         .. note:: `man ssh_config` is highly recommended amendment to this
                    command.
         """
-        self.server = b(server)
+        self.server = server
         self.port = port
         self.timeout = timeout
         self.check_server(server)
