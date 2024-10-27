@@ -395,6 +395,9 @@ class SSHConnection(object):
         if self.master and not self.slave:
             raise SSHError('This SSHConnection is an SSH master connection, no secure copying can be done over this SSHConnection.')
 
+        if not isinstance(files, (list, tuple)):
+            raise SSHError('The files argument to scp() function must be a list or tuple')
+
         filenames, tmpdir = self.convert_files_to_filenames(files)
 
         def cleanup_tmp_dir():
